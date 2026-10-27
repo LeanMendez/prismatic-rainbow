@@ -1,9 +1,8 @@
 # prismatic-rainbow
 
-CLI para **Bitbucket Cloud** (API REST 2.0) pensada para usar con agentes.
-Toma como base [`ahumadamatias/bb`](https://github.com/ahumadamatias/bb) (un
-CLI estilo `gh` para consultar y operar PRs desde la terminal) y la extiende
-para dos tipos de agente:
+CLI para **Bitbucket Cloud** (API REST 2.0) para consultar y operar pull
+requests desde la terminal. Está pensada para personas y, sobre todo, para
+dos tipos de agente:
 
 - **Agentes de código.** Leen el código de un PR sin clonar ni hacer checkout.
   Pueden pedir un diff filtrado y acotado, el archivo completo en la rama del
@@ -16,21 +15,21 @@ Solo soporta Bitbucket Cloud (bitbucket.org). La CLI no llama a la API de
 ClickUp. Detecta los IDs de tarea en el PR y la tarea se lee con la
 herramienta de ClickUp del agente (por ejemplo el MCP oficial).
 
-## Qué agrega sobre `bb`
+## Características
 
-| Necesidad | `bb` | prismatic-rainbow |
-|---|---|---|
-| Contrato JSON | `-o json` con el payload crudo de la API | `-o json` en todo; modelo normalizado y estable; errores JSON con `code`, `required_scopes` y `retryable` |
-| Diff | `pr view --diff` completo | `pr diff` con `--path`/`--exclude` (globs, `**`), `--name-only`, `--context`, `--ignore-whitespace`, `--max-lines-per-file` (conserva 60% del inicio y 40% del final), `--max-bytes` con `omitted_files` |
-| Código del PR | script `.mjs` que hace `git fetch` | `pr file <pr> <path>` (origen o destino, `--lines 10:40`, soporta forks), `src cat/ls --ref <rama/tag/sha>` vía API |
-| Estado del PR | estado y cantidad de aprobaciones | revisores con decisión (`approved`/`changes_requested`/`pending`), `pr checks` (builds; exit 8 si hay pendientes), `pr mergeability` (qué bloquea el merge) |
-| Discusión | comentar | `pr comments` en hilos (resuelto/no, archivo:línea, respuestas), `pr tasks`, `pr comment --reply-to/--from-line/--body-file -`, `pr request-changes` |
-| ClickUp | — | `pr links` (CU-id, URLs, IDs custom, `#id`, `[estado]`), `pr list --task <ID>` |
-| Una sola llamada | — | `pr context [--diff]`: PR, checks, mergeability, archivos, commits, hilos, tareas y refs de ClickUp; las secciones que fallan se reportan en `warnings` sin abortar |
-| PR implícito | — | `<pr>` acepta `42`, `#42`, la URL del PR, o nada (usa el PR abierto de la rama actual) |
-| Auth | email + API token | también access tokens de workspace/repo (Bearer), `--with-token` por stdin, variables compatibles con Bitbucket Pipelines |
-| Robustez | — | reintentos con backoff ante 429/5xx (solo GET, respeta `Retry-After`), sigue el redirect 302 del diff |
-| Escape hatch | — | `api <path>` con `{workspace}`/`{repo}` y `--paginate` |
+| Área | Qué ofrece |
+|---|---|
+| Salida para agentes | `-o json` en todos los comandos, con un modelo normalizado y estable. Los errores también salen en JSON, con `code`, `required_scopes` y `retryable`. |
+| Diff | `pr diff` con `--path`/`--exclude` (globs, `**`), `--name-only`, `--context`, `--ignore-whitespace`, `--max-lines-per-file` (conserva 60% del inicio y 40% del final) y `--max-bytes`, que lista lo que quedó afuera en `omitted_files`. |
+| Código del PR | `pr file <pr> <path>` lee el archivo completo en el commit de origen o de destino (`--lines 10:40`, soporta forks). `src cat`/`src ls --ref <rama/tag/sha>` leen cualquier ref vía API, sin clonar. |
+| Estado del PR | Revisores con su decisión (`approved`/`changes_requested`/`pending`), `pr checks` (builds; exit 8 si hay pendientes) y `pr mergeability` (qué bloquea el merge). |
+| Discusión | `pr comments` agrupa en hilos (resuelto o no, archivo:línea, respuestas). También `pr tasks`, `pr comment` (inline, `--reply-to`, `--from-line`, `--body-file -`), `pr approve` y `pr request-changes`. |
+| ClickUp | `pr links` detecta `CU-<id>`, URLs de tareas, IDs custom, `#id` y el sufijo `[estado]`. `pr list --task <ID>` busca los PRs de una tarea. |
+| Una sola llamada | `pr context [--diff]` devuelve el PR, checks, mergeability, archivos, commits, hilos, tareas y referencias de ClickUp. Si una sección falla, se reporta en `warnings` y el resto se devuelve igual. |
+| PR implícito | `<pr>` acepta `42`, `#42`, la URL del PR, o nada (usa el PR abierto de la rama actual). |
+| Auth | API token de usuario (email + token) o access token de workspace/repo (Bearer). `--with-token` lee el token de stdin. Usa las mismas variables que Bitbucket Pipelines. |
+| Robustez | Reintenta con backoff ante 429/5xx (solo GET, respeta `Retry-After`) y sigue el redirect 302 del diff. |
+| Escape hatch | `api <path>` con `{workspace}`/`{repo}` y `--paginate`. |
 
 ## Instalación
 
