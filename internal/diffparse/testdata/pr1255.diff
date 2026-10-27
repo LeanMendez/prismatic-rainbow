@@ -1,0 +1,1891 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index e20a6a2029..753537c66f 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [9.14.0]
++- [AMPSDEV-373](https://ecosystem.atlassian.net/browse/AMPSDEV-373) Refuse to extract ZIP and TAR.GZ entries that would
++  resolve outside the target directory (path traversal), e.g. when unpacking `<dataPath>`/`<productDataPath>` home data
++  or installing the SDK with `atlas-update`. Effective entry paths are checked after trimming or flattening using the
++  current platform's rules for absolute paths (including drive-letter and UNC paths on Windows). Entry paths, entry
++  types and existing destination components are checked before extraction, rejecting archive links and special files
++  and preventing writes through existing symbolic links. Preflight failures leave the destination untouched; later
++  extraction failures can leave partial output. The Spring XML to Java transform also confines generated writes,
++  validates resource paths before conversion, and preserves input XML until all generated outputs are written.
+ - [NEPTUNE-454](https://hello.atlassian.net/browse/NEPTUNE-454) Upgrade Crowd to 7.2.4.
+ - [DCA11Y-3315](https://hello.jira.atlassian.cloud/browse/DCA11Y-3315) Record i18n keys used through a
+   function-call namespace, including `n(938).I18n.getText(...)` and `t.n(u)().I18n.getText(...)`. Generated
+diff --git a/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/ComponentImportsConverter.java b/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/ComponentImportsConverter.java
+index ecbae91dfb..3a1a88b3d7 100644
+--- a/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/ComponentImportsConverter.java
++++ b/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/ComponentImportsConverter.java
+@@ -100,13 +100,15 @@ class ComponentImportsConverter implements IndividualConverter {
+         if (allBeanParams.isEmpty()) return ImmutableList.of();
+ 
+         Path outputPath = destDir.resolve(IMPORT_BEANS_JAVA);
+-        generateImportBeansJavaFile(outputPath, allBeanParams, additionalImports);
++        generateImportBeansJavaFile(destDir, outputPath, allBeanParams, additionalImports);
+ 
+         return ImmutableList.of(outputPath);
+     }
+ 
+     private void generateImportBeansJavaFile(
+-            Path outputPath, Set<Map<String, String>> allBeanParams, Set<String> additionalImports) throws IOException {
+-        generateJavaFile(outputPath, allBeanParams, IMPORT_ENTRY_TEMPLATE, IMPORT_BEANS_TEMPLATE, additionalImports);
++            Path destDir, Path outputPath, Set<Map<String, String>> allBeanParams, Set<String> additionalImports)
++            throws IOException {
++        generateJavaFile(
++                destDir, outputPath, allBeanParams, IMPORT_ENTRY_TEMPLATE, IMPORT_BEANS_TEMPLATE, additionalImports);
+     }
+ }
+diff --git a/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/ComponentsConverter.java b/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/ComponentsConverter.java
+index 8f3ed82cb9..ea37976ff2 100644
+--- a/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/ComponentsConverter.java
++++ b/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/ComponentsConverter.java
+@@ -89,7 +89,7 @@ class ComponentsConverter implements IndividualConverter {
+         // Generate PluginBeans.java if there are beans
+         if (!beans.isEmpty()) {
+             Path pluginBeansPath = destDir.resolve(PLUGIN_BEANS_JAVA);
+-            generatePluginBeansJavaFile(pluginBeansPath, beanNameToClass);
++            generatePluginBeansJavaFile(destDir, pluginBeansPath, beanNameToClass);
+             generatedFiles.add(pluginBeansPath);
+         }
+ 
+@@ -98,7 +98,7 @@ class ComponentsConverter implements IndividualConverter {
+         Set<ServiceInfo> serviceInfos = extractServiceInfo(services, beanNameToClass);
+         if (!serviceInfos.isEmpty()) {
+             Path exportBeansPath = destDir.resolve(EXPORT_BEANS_JAVA);
+-            generateExportBeansJavaFile(exportBeansPath, serviceInfos);
++            generateExportBeansJavaFile(destDir, exportBeansPath, serviceInfos);
+             generatedFiles.add(exportBeansPath);
+         }
+ 
+@@ -117,7 +117,8 @@ class ComponentsConverter implements IndividualConverter {
+         return unmodifiableMap(beanNameToClass);
+     }
+ 
+-    private void generatePluginBeansJavaFile(Path outputPath, Map<String, String> beanNameToClass) throws IOException {
++    private void generatePluginBeansJavaFile(Path destDir, Path outputPath, Map<String, String> beanNameToClass)
++            throws IOException {
+         String packageName = getQualifiedPackageFromPath(outputPath);
+         String importsSection = getImportsFromClassNames(beanNameToClass.values());
+ 
+@@ -131,7 +132,7 @@ class ComponentsConverter implements IndividualConverter {
+                 "imports", importsSection,
+                 "classNamesAsString", classNamesAsString);
+ 
+-        writeTemplateToPath(outputPath, PLUGIN_BEANS_TEMPLATE, params);
++        writeTemplateToPath(destDir, outputPath, PLUGIN_BEANS_TEMPLATE, params);
+     }
+ 
+     private Set<ServiceInfo> extractServiceInfo(List<Element> services, Map<String, String> beanNameToClass) {
+@@ -164,7 +165,8 @@ class ComponentsConverter implements IndividualConverter {
+         return serviceMap;
+     }
+ 
+-    private void generateExportBeansJavaFile(Path outputPath, Set<ServiceInfo> serviceMap) throws IOException {
++    private void generateExportBeansJavaFile(Path destDir, Path outputPath, Set<ServiceInfo> serviceMap)
++            throws IOException {
+         Set<Map<String, String>> beanParams = new LinkedHashSet<>();
+         Set<String> additionalImports = new LinkedHashSet<>();
+ 
+@@ -183,7 +185,8 @@ class ComponentsConverter implements IndividualConverter {
+             additionalImports.addAll(serviceInfo.interfaces);
+         }
+ 
+-        generateJavaFile(outputPath, beanParams, EXPORT_ENTRY_TEMPLATE, EXPORT_BEANS_TEMPLATE, additionalImports);
++        generateJavaFile(
++                destDir, outputPath, beanParams, EXPORT_ENTRY_TEMPLATE, EXPORT_BEANS_TEMPLATE, additionalImports);
+     }
+ 
+     private static class ServiceInfo {
+diff --git a/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/GenerateJavaUtil.java b/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/GenerateJavaUtil.java
+index 55b7dd4406..d409834b88 100644
+--- a/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/GenerateJavaUtil.java
++++ b/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/GenerateJavaUtil.java
+@@ -34,13 +34,28 @@ import com.google.common.collect.ImmutableMap;
+  */
+ public class GenerateJavaUtil {
+ 
++    /**
++     * Generates a Java file from the given templates.
++     *
++     * @param destDir the directory to which the write is confined
++     * @param outputPath the Java file to write, which must be within {@code destDir}
++     * @param allBeanParams the parameters of each bean, for {@code entryTemplate}
++     * @param entryTemplate the template used for each bean
++     * @param fileTemplate the template used for the whole file
++     * @throws IOException if the file cannot be written
++     */
+     static void generateJavaFile(
+-            Path outputPath, Set<Map<String, String>> allBeanParams, String entryTemplate, String fileTemplate)
++            Path destDir,
++            Path outputPath,
++            Set<Map<String, String>> allBeanParams,
++            String entryTemplate,
++            String fileTemplate)
+             throws IOException {
+-        generateJavaFile(outputPath, allBeanParams, entryTemplate, fileTemplate, emptyList());
++        generateJavaFile(destDir, outputPath, allBeanParams, entryTemplate, fileTemplate, emptyList());
+     }
+ 
+     static void generateJavaFile(
++            Path destDir,
+             Path outputPath,
+             Set<Map<String, String>> allBeanParams,
+             String entryTemplate,
+@@ -78,7 +93,7 @@ public class GenerateJavaUtil {
+                 "imports", importsSection,
+                 "entries", entriesSection);
+ 
+-        writeTemplateToPath(outputPath, fileTemplate, params);
++        writeTemplateToPath(destDir, outputPath, fileTemplate, params);
+     }
+ 
+     static String getImportsFromClassNames(Collection<String> classNames) {
+diff --git a/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/HostComponentsConverter.java b/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/HostComponentsConverter.java
+index 90719a291a..d277dfff17 100644
+--- a/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/HostComponentsConverter.java
++++ b/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/HostComponentsConverter.java
+@@ -107,7 +107,7 @@ class HostComponentsConverter implements IndividualConverter {
+         if (allBeanParams.isEmpty()) return ImmutableList.of();
+ 
+         Path outputPath = destDir.resolve(LAZY_IMPORT_BEANS_JAVA);
+-        generateLazyImportsJavaFile(outputPath, allBeanParams, additionalImports);
++        generateLazyImportsJavaFile(destDir, outputPath, allBeanParams, additionalImports);
+ 
+         return ImmutableList.of(outputPath);
+     }
+@@ -120,9 +120,14 @@ class HostComponentsConverter implements IndividualConverter {
+     }
+ 
+     private static void generateLazyImportsJavaFile(
+-            Path outputPath, Set<Map<String, String>> allBeanParams, Collection<String> additionalImports)
++            Path destDir, Path outputPath, Set<Map<String, String>> allBeanParams, Collection<String> additionalImports)
+             throws IOException {
+         generateJavaFile(
+-                outputPath, allBeanParams, LAZY_IMPORT_ENTRY_TEMPLATE, LAZY_IMPORT_BEANS_TEMPLATE, additionalImports);
++                destDir,
++                outputPath,
++                allBeanParams,
++                LAZY_IMPORT_ENTRY_TEMPLATE,
++                LAZY_IMPORT_BEANS_TEMPLATE,
++                additionalImports);
+     }
+ }
+diff --git a/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/ModuleTypesConverter.java b/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/ModuleTypesConverter.java
+index 91210264fa..f3b97d4414 100644
+--- a/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/ModuleTypesConverter.java
++++ b/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/ModuleTypesConverter.java
+@@ -109,13 +109,13 @@ class ModuleTypesConverter implements IndividualConverter {
+         if (allBeanParams.isEmpty()) return ImmutableList.of();
+ 
+         Path outputPath = destDir.resolve(MODULE_TYPE_BEANS_JAVA);
+-        generateModuleTypeBeansJavaFile(outputPath, allBeanParams);
++        generateModuleTypeBeansJavaFile(destDir, outputPath, allBeanParams);
+ 
+         return ImmutableList.of(outputPath);
+     }
+ 
+-    private void generateModuleTypeBeansJavaFile(Path outputPath, Set<Map<String, String>> allBeanParams)
++    private void generateModuleTypeBeansJavaFile(Path destDir, Path outputPath, Set<Map<String, String>> allBeanParams)
+             throws IOException {
+-        generateJavaFile(outputPath, allBeanParams, MODULE_TYPE_ENTRY_TEMPLATE, MODULE_TYPE_BEANS_TEMPLATE);
++        generateJavaFile(destDir, outputPath, allBeanParams, MODULE_TYPE_ENTRY_TEMPLATE, MODULE_TYPE_BEANS_TEMPLATE);
+     }
+ }
+diff --git a/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/SpringXmlToJavaConverter.java b/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/SpringXmlToJavaConverter.java
+index 8c2a42e7b5..1dd131d257 100644
+--- a/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/SpringXmlToJavaConverter.java
++++ b/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/SpringXmlToJavaConverter.java
+@@ -23,6 +23,7 @@ import org.apache.maven.plugin.logging.Log;
+ import com.google.common.collect.ImmutableList;
+ import com.google.common.collect.ImmutableMap;
+ 
++import com.atlassian.maven.plugins.amps.util.PathConfinement;
+ import com.atlassian.plugins.codegen.ArtifactDependency;
+ import com.atlassian.plugins.codegen.ArtifactDependency.Scope;
+ 
+@@ -79,10 +80,13 @@ public class SpringXmlToJavaConverter {
+         Path springXmlDirPath = resourcesPath.resolve(SPRING_CONTEXT_DIRECTORY);
+         Path defaultSpringXmlPath = springXmlDirPath.resolve(BASE_SPRING_XML);
+ 
++        // Validate before reading or deleting any input through the resource directory.
++        PathConfinement.validateDirectory(resourcesPath, springXmlDirPath);
+         if (Files.exists(defaultSpringXmlPath)) {
+             log.info("Skipping conversion to Spring Java, conflicting Spring context found at " + defaultSpringXmlPath);
+             return false;
+         }
++        PathConfinement.validateFile(resourcesPath, defaultSpringXmlPath);
+ 
+         Path basePackagePath = findBasePackage(srcPath);
+         Path springPackagePath = basePackagePath.resolve("spring");
+@@ -90,7 +94,8 @@ public class SpringXmlToJavaConverter {
+             log.info("Skipping conversion to Spring Java, conflicting Spring package found at " + springPackagePath);
+             return false;
+         }
+-        Files.createDirectories(springPackagePath);
++        // Refuses to create the package outside the source directory, e.g. through a symbolic link
++        springPackagePath = PathConfinement.createDirectories(srcPath, springPackagePath);
+ 
+         List<Path> createdJavaFiles = convertRecognisedXmlFiles(springXmlDirPath, springPackagePath);
+         if (createdJavaFiles.isEmpty()) {
+@@ -99,8 +104,13 @@ public class SpringXmlToJavaConverter {
+         }
+ 
+         Path springBeansJavaFile = springPackagePath.resolve(SPRING_BEANS_JAVA);
+-        writeSpringBeansJavaFile(springBeansJavaFile, createdJavaFiles);
+-        writeSpringXmlFile(defaultSpringXmlPath, springBeansJavaFile);
++        writeSpringBeansJavaFile(srcPath, springBeansJavaFile, createdJavaFiles);
++        writeSpringXmlFile(resourcesPath, defaultSpringXmlPath, springBeansJavaFile);
++        // Keep the original configuration until every replacement has been written successfully.
++        PathConfinement.validateDirectory(resourcesPath, springXmlDirPath);
++        for (IndividualConverter converter : registeredConverters) {
++            Files.deleteIfExists(springXmlDirPath.resolve(converter.supportedXmlFilename()));
++        }
+         return true;
+     }
+ 
+@@ -112,14 +122,11 @@ public class SpringXmlToJavaConverter {
+                 createdJavaFiles.addAll(converter.convert(xmlFilePath, springPackagePath));
+             }
+         }
+-        // Delete all together at end because some converters depend on others' XML files (not ideal)
+-        for (IndividualConverter converter : registeredConverters) {
+-            Files.deleteIfExists(springXmlDirPath.resolve(converter.supportedXmlFilename()));
+-        }
+         return unmodifiableList(createdJavaFiles);
+     }
+ 
+-    private void writeSpringBeansJavaFile(Path springBeansJavaFile, List<Path> createdJavaFiles) throws IOException {
++    private void writeSpringBeansJavaFile(Path srcPath, Path springBeansJavaFile, List<Path> createdJavaFiles)
++            throws IOException {
+         // Generate classNamesAsString (simple class names for @Import annotation)
+         String classNamesAsString = getSpringConfigImportsFromClassNames(createdJavaFiles.stream()
+                 .map(JavaSourcePathUtil::getSimpleClassNameFromJavaFilePath)
+@@ -130,12 +137,14 @@ public class SpringXmlToJavaConverter {
+                 getQualifiedPackageFromPath(springBeansJavaFile),
+                 "classNamesAsString",
+                 classNamesAsString);
+-        writeTemplateToPath(springBeansJavaFile, SPR_BEANS_JAVA_TPLT, params);
++        writeTemplateToPath(srcPath, springBeansJavaFile, SPR_BEANS_JAVA_TPLT, params);
+         log.info("Wrote Spring Java config to " + springBeansJavaFile);
+     }
+ 
+-    private void writeSpringXmlFile(Path springXmlPath, Path springBeansJavaFile) throws IOException {
++    private void writeSpringXmlFile(Path resourcesPath, Path springXmlPath, Path springBeansJavaFile)
++            throws IOException {
+         writeTemplateToPath(
++                resourcesPath,
+                 springXmlPath,
+                 SPRING_XML_TPLT,
+                 ImmutableMap.of("qualifiedClassName", getQualifiedNameFromJavaFilePath(springBeansJavaFile)));
+diff --git a/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/TemplateUtil.java b/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/TemplateUtil.java
+index 7f99b32a78..20534a3c02 100644
+--- a/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/TemplateUtil.java
++++ b/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/TemplateUtil.java
+@@ -5,20 +5,24 @@ import static java.util.Objects.requireNonNull;
+ 
+ import java.io.IOException;
+ import java.io.InputStream;
+-import java.nio.file.Files;
++import java.io.OutputStream;
+ import java.nio.file.Path;
+ import java.util.Map;
+ 
+ import org.apache.commons.io.IOUtils;
+ import org.apache.commons.text.StringSubstitutor;
+ 
++import com.atlassian.maven.plugins.amps.util.PathConfinement;
++
+ /**
+  * Lightweight templating utility for reading resource templates, substituting parameters, and writing to disk.
+  *
+  * <p>It uses Apache Commons Text {@link StringSubstitutor} for variable substitution with the syntax
+  * {@code ${variableName}}.
+  *
+- * <p>Templates are loaded from the classpath relative to this class's package location in the resources directory.
++ * <p>Templates are loaded from the classpath relative to this class's package location in the resources directory, and
++ * must be referred to by their simple file name. Generated files are confined to a given root directory, and are never
++ * written through symbolic links.
+  *
+  * @see GenerateJavaUtil
+  * @see IndividualConverter
+@@ -26,19 +30,57 @@ import org.apache.commons.text.StringSubstitutor;
+  */
+ public class TemplateUtil {
+ 
+-    public static void writeTemplateToPath(Path writePath, String template, Map<String, String> params)
++    /**
++     * Processes the given template and writes the result to the given path.
++     *
++     * @param root the directory to which the write is confined; it is created if missing
++     * @param writePath the file to write, which must be a descendant of {@code root}
++     * @param template the simple file name of the template, relative to this class's package
++     * @param params the template parameters
++     * @throws IOException if the template cannot be read, or the file is outside {@code root}, would be written through
++     *     a symbolic link, or cannot be written
++     */
++    public static void writeTemplateToPath(Path root, Path writePath, String template, Map<String, String> params)
+             throws IOException {
+-        Files.write(writePath, getProcessedTemplate(template, params).getBytes(UTF_8));
++        final byte[] content = getProcessedTemplate(template, params).getBytes(UTF_8);
++        try (OutputStream out = PathConfinement.newOutputStream(root, writePath)) {
++            out.write(content);
++        }
+     }
+ 
++    /**
++     * Processes the given template.
++     *
++     * @param template the simple file name of the template, relative to this class's package
++     * @param params the template parameters
++     * @return the processed template
++     * @throws IOException if the template cannot be read
++     */
+     public static String getProcessedTemplate(String template, Map<String, String> params) throws IOException {
+         return new StringSubstitutor(params).replace(readResourceAsString(template));
+     }
+ 
+-    static String readResourceAsString(String resourcePath) throws IOException {
+-        try (InputStream inputStream = TemplateUtil.class.getResourceAsStream(resourcePath)) {
++    static String readResourceAsString(String resourceName) throws IOException {
++        requireSimpleResourceName(resourceName);
++        try (InputStream inputStream = TemplateUtil.class.getResourceAsStream(resourceName)) {
+             return IOUtils.toString(
+-                    requireNonNull(inputStream, String.format("Resource does not exist: %s", resourcePath)), UTF_8);
++                    requireNonNull(inputStream, String.format("Resource does not exist: %s", resourceName)), UTF_8);
++        }
++    }
++
++    /**
++     * Only allows names of resources in this class's own package, so that a template name can't select an arbitrary
++     * classpath resource, e.g. via {@code /} (absolute lookup) or {@code ..} segments.
++     */
++    private static void requireSimpleResourceName(final String resourceName) {
++        if (resourceName.isEmpty()
++                || resourceName.contains("/")
++                || resourceName.contains("\\")
++                || resourceName.equals(".")
++                || resourceName.equals("..")) {
++            throw new IllegalArgumentException(String.format(
++                    "Invalid template name '%s'; expected the simple file name of a resource in package %s",
++                    resourceName, TemplateUtil.class.getPackage().getName()));
+         }
+     }
+ }
+diff --git a/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/util/PathConfinement.java b/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/util/PathConfinement.java
+new file mode 100644
+index 0000000000..592f2a6ede
+--- /dev/null
++++ b/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/util/PathConfinement.java
+@@ -0,0 +1,226 @@
++package com.atlassian.maven.plugins.amps.util;
++
++import static java.nio.file.LinkOption.NOFOLLOW_LINKS;
++import static java.nio.file.StandardOpenOption.CREATE;
++import static java.nio.file.StandardOpenOption.TRUNCATE_EXISTING;
++import static java.nio.file.StandardOpenOption.WRITE;
++
++import java.io.IOException;
++import java.io.OutputStream;
++import java.nio.file.FileAlreadyExistsException;
++import java.nio.file.Files;
++import java.nio.file.InvalidPathException;
++import java.nio.file.NoSuchFileException;
++import java.nio.file.Path;
++import java.nio.file.attribute.BasicFileAttributes;
++
++/**
++ * Confines file system writes to a root directory, guarding against path traversal.
++ *
++ * <p>Paths are first checked lexically: an untrusted relative path must not be absolute on the current platform, or use
++ * {@code ..} segments to escape the root. On Windows, "absolute" also covers drive-relative paths such as
++ * {@code C:foo}, rooted paths such as {@code \foo} and UNC paths; elsewhere, those are just unusual file names. Then,
++ * when directories and files are created, every path component below the root is checked without following links: an
++ * existing symbolic link (or Windows junction) or a non-directory in the way causes the write to be refused, rather
++ * than followed to wherever it points.
++ *
++ * <p>The root itself is trusted, and may be (or sit below) a symbolic link.
++ *
++ * <p>The checks happen just before each component is used. A concurrent process able to modify the tree under the root
++ * at the same time could still race them, so callers should only write into directories that untrusted users cannot
++ * modify.
++ *
++ * @since 9.14
++ */
++public final class PathConfinement {
++
++    private PathConfinement() {}
++
++    /**
++     * Resolves an untrusted relative path against the given root, without touching the file system.
++     *
++     * @param root the trusted root directory
++     * @param untrustedPath the relative path, e.g. an archive entry name; may contain {@code ..} segments as long as
++     *     they don't escape the root. A leading {@code ~} is not expanded, i.e. it's just a directory name
++     * @return the normalised, absolute target, guaranteed to be the root or one of its descendants
++     * @throws IOException if the path is not relative on the current platform, is not a valid path, or escapes the root
++     */
++    public static Path resolve(final Path root, final String untrustedPath) throws IOException {
++        final Path relative;
++        try {
++            relative = root.getFileSystem().getPath(untrustedPath);
++        } catch (InvalidPathException e) {
++            throw new IOException(String.format("'%s' is not a valid path: %s", untrustedPath, e.getMessage()), e);
++        }
++        if (relative.getRoot() != null) {
++            // Not just isAbsolute(), which is false for Windows paths such as "C:foo" and "\foo" that still escape
++            throw new IOException(String.format("'%s' is an absolute path", untrustedPath));
++        }
++        return requireWithin(root, root.resolve(relative));
++    }
++
++    /**
++     * Checks lexically that the given target is the root or one of its descendants, without touching the file system.
++     *
++     * @param root the trusted root directory
++     * @param target the target path; relative paths are resolved against the working directory
++     * @return the normalised, absolute target
++     * @throws IOException if the target is outside the root
++     */
++    public static Path requireWithin(final Path root, final Path target) throws IOException {
++        final Path normalisedRoot = normalise(root);
++        final Path normalisedTarget = normalise(target);
++        if (!normalisedTarget.startsWith(normalisedRoot)) {
++            throw new IOException(
++                    String.format("'%s' is outside the target directory '%s'", normalisedTarget, normalisedRoot));
++        }
++        return normalisedTarget;
++    }
++
++    /**
++     * Validates a directory and its existing ancestors below the trusted root without creating anything. Missing
++     * directories are allowed, but existing symbolic links, junctions and non-directories below the root are not. This
++     * is a preflight check, not a reservation: callers must still check paths when performing the write.
++     *
++     * @return the normalised, absolute directory
++     * @throws IOException if the directory escapes the root or an existing path component is unsuitable
++     */
++    public static Path validateDirectory(final Path root, final Path directory) throws IOException {
++        final Path normalisedRoot = normalise(root);
++        final Path normalisedDirectory = requireWithin(normalisedRoot, directory);
++        // The root is trusted and may be a link, but must resolve to a directory if it exists.
++        if (Files.exists(normalisedRoot, NOFOLLOW_LINKS) && !Files.isDirectory(normalisedRoot)) {
++            throw new IOException(String.format("'%s' is not a directory", normalisedRoot));
++        }
++        Path current = normalisedRoot;
++        for (final Path name : normalisedRoot.relativize(normalisedDirectory)) {
++            if (name.toString().isEmpty()) {
++                continue;
++            }
++            current = current.resolve(name);
++            final BasicFileAttributes attributes = readAttributesIfExists(current);
++            if (attributes == null) {
++                break; // Descendants cannot exist below a missing directory.
++            }
++            requireRealDirectory(current, attributes);
++        }
++        return normalisedDirectory;
++    }
++
++    /**
++     * Validates a file destination without creating or truncating anything. Existing ancestors below the trusted root
++     * must be real directories, and an existing destination must be a regular file. Missing paths are allowed. This
++     * does not check permissions or guarantee that a subsequent write will succeed.
++     *
++     * @return the normalised, absolute file
++     * @throws IOException if the file escapes the root, is the root, or an existing path component is unsuitable
++     */
++    public static Path validateFile(final Path root, final Path file) throws IOException {
++        final Path normalisedRoot = normalise(root);
++        final Path normalisedFile = requireWithin(normalisedRoot, file);
++        requireDescendantFile(normalisedRoot, normalisedFile);
++        validateDirectory(normalisedRoot, normalisedFile.getParent());
++        requireRegularFileIfExists(normalisedFile);
++        return normalisedFile;
++    }
++
++    /**
++     * Creates the given directory and any missing ancestors below the root, refusing to traverse symbolic links,
++     * junctions, or non-directories below the root. The root itself is created if missing.
++     *
++     * @param root the trusted root directory
++     * @param directory the directory to create, which must be the root or one of its descendants
++     * @return the normalised, absolute directory
++     * @throws IOException if the directory is outside the root, a path component below the root is a link or not a
++     *     directory, or the directory cannot be created
++     */
++    public static Path createDirectories(final Path root, final Path directory) throws IOException {
++        final Path normalisedRoot = normalise(root);
++        final Path normalisedDirectory = requireWithin(normalisedRoot, directory);
++        if (!Files.isDirectory(normalisedRoot)) {
++            // The root is trusted, so it may be a link; Files.createDirectories would reject a link to a directory
++            Files.createDirectories(normalisedRoot);
++        }
++        Path current = normalisedRoot;
++        for (final Path name : normalisedRoot.relativize(normalisedDirectory)) {
++            if (name.toString().isEmpty()) {
++                continue; // relativising a path to itself yields a single empty name
++            }
++            current = current.resolve(name);
++            try {
++                Files.createDirectory(current);
++            } catch (FileAlreadyExistsException e) {
++                // Something already exists here; it's checked below
++            }
++            requireRealDirectory(current);
++        }
++        return normalisedDirectory;
++    }
++
++    /**
++     * Opens the given file for writing, creating it (and any missing parent directories below the root) or truncating
++     * it, without following symbolic links anywhere below the root.
++     *
++     * @param root the trusted root directory
++     * @param file the file to write, which must be a descendant of the root
++     * @return a stream writing to the file
++     * @throws IOException if the file is outside the root or is the root itself, a path component below the root is a
++     *     link or not a directory, the file exists but is not a regular file, or the file cannot be opened
++     */
++    public static OutputStream newOutputStream(final Path root, final Path file) throws IOException {
++        final Path normalisedRoot = normalise(root);
++        final Path normalisedFile = requireWithin(normalisedRoot, file);
++        requireDescendantFile(normalisedRoot, normalisedFile);
++        createDirectories(normalisedRoot, normalisedFile.getParent());
++        requireRegularFileIfExists(normalisedFile);
++        // NOFOLLOW_LINKS also protects against the file being replaced with a link since the check above
++        return Files.newOutputStream(normalisedFile, CREATE, TRUNCATE_EXISTING, WRITE, NOFOLLOW_LINKS);
++    }
++
++    private static void requireDescendantFile(final Path root, final Path file) throws IOException {
++        if (file.equals(root)) {
++            throw new IOException(String.format("'%s' is the target directory itself, not a file", file));
++        }
++    }
++
++    private static void requireRegularFileIfExists(final Path file) throws IOException {
++        final BasicFileAttributes attributes = readAttributesIfExists(file);
++        if (attributes != null && !attributes.isRegularFile()) {
++            throw new IOException(
++                    String.format("'%s' already exists and is %s", file, describeNonRegularFile(attributes)));
++        }
++    }
++
++    private static void requireRealDirectory(final Path path) throws IOException {
++        requireRealDirectory(path, Files.readAttributes(path, BasicFileAttributes.class, NOFOLLOW_LINKS));
++    }
++
++    private static void requireRealDirectory(final Path path, final BasicFileAttributes attributes) throws IOException {
++        if (attributes.isSymbolicLink() || attributes.isOther()) {
++            // On Windows, junctions are reported as "other", not as symbolic links
++            throw new IOException(String.format("'%s' is a symbolic link or junction; refusing to follow it", path));
++        }
++        if (!attributes.isDirectory()) {
++            throw new IOException(String.format("'%s' is not a directory", path));
++        }
++    }
++
++    private static BasicFileAttributes readAttributesIfExists(final Path path) throws IOException {
++        try {
++            return Files.readAttributes(path, BasicFileAttributes.class, NOFOLLOW_LINKS);
++        } catch (NoSuchFileException e) {
++            return null;
++        }
++    }
++
++    private static String describeNonRegularFile(final BasicFileAttributes attributes) {
++        if (attributes.isSymbolicLink() || attributes.isOther()) {
++            return "a symbolic link, junction or special file; refusing to follow it";
++        }
++        return attributes.isDirectory() ? "a directory" : "not a regular file";
++    }
++
++    private static Path normalise(final Path path) {
++        return path.toAbsolutePath().normalize();
++    }
++}
+diff --git a/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/util/ZipUtils.java b/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/util/ZipUtils.java
+index 0cf407a7ff..df57d75587 100644
+--- a/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/util/ZipUtils.java
++++ b/amps-maven-plugin/src/main/java/com/atlassian/maven/plugins/amps/util/ZipUtils.java
+@@ -6,7 +6,6 @@ import static org.apache.commons.io.IOUtils.copy;
+ 
+ import java.io.File;
+ import java.io.FileInputStream;
+-import java.io.FileOutputStream;
+ import java.io.IOException;
+ import java.io.InputStream;
+ import java.io.OutputStream;
+@@ -14,6 +13,7 @@ import java.nio.file.Files;
+ import java.nio.file.LinkOption;
+ import java.nio.file.Path;
+ import java.nio.file.attribute.BasicFileAttributes;
++import java.util.Collections;
+ import java.util.Enumeration;
+ import java.util.List;
+ import java.util.regex.Pattern;
+@@ -51,51 +51,72 @@ public final class ZipUtils {
+     @SuppressWarnings("OctalInteger")
+     private static final int MODE_EXECUTABLE = 0700;
+ 
++    /** Mask for the file type bits of a Unix mode, as stored in ZIP entries. */
++    @SuppressWarnings("OctalInteger")
++    private static final int UNIX_FILE_TYPE_MASK = 0170000;
++
++    /** Unix file type of a regular file. */
++    @SuppressWarnings("OctalInteger")
++    private static final int UNIX_REGULAR_FILE = 0100000;
++
++    /** Unix file type of a directory. */
++    @SuppressWarnings("OctalInteger")
++    private static final int UNIX_DIRECTORY = 0040000;
++
+     /**
+      * Ungzips and extracts the specified tar.gz file into the specified directory, trimming the specified number of
+      * leading path segments from the extraction path.
+      *
++     * <p>Extraction is guarded against path traversal in the same way as {@link #unzip(File, String, int, boolean,
++     * Pattern)}. In addition, symbolic links, hard links, devices and FIFOs are refused.
++     *
+      * @param targz the tar.gz file to use
+      * @param destDir the directory to contain the extracted contents
+      * @param leadingPathSegmentsToTrim the number of leading path segments to remove from the extracted path
+-     * @throws IOException if the archive cannot be expanded
++     * @throws IOException if the archive cannot be expanded, or if it contains an entry that is not a regular file or
++     *     directory, or that would be extracted outside {@code destDir}
+      */
+     public static void untargz(File targz, String destDir, int leadingPathSegmentsToTrim) throws IOException {
+-        try (final FileInputStream fin = new FileInputStream(targz);
++        final Path destRoot = canonicalRoot(destDir);
++        // Preflight entry paths, types and existing destination components before writing anything.
++        forEachTarEntry(targz, (tarIn, entry) -> resolveTarEntry(destRoot, entry, leadingPathSegmentsToTrim));
++        forEachTarEntry(targz, (tarIn, entry) -> {
++            final Path target = resolveTarEntry(destRoot, entry, leadingPathSegmentsToTrim);
++            if (entry.isDirectory()) {
++                createDirectories(destRoot, target, entry.getName());
++            } else {
++                writeEntry(destRoot, target, entry.getName(), tarIn);
++                if (isExecutable(entry)) {
++                    makeExecutable(target.toFile());
++                }
++            }
++        });
++    }
++
++    private static void forEachTarEntry(final File targz, final TarEntryHandler handler) throws IOException {
++        try (final InputStream fin = Files.newInputStream(targz.toPath());
+                 final GzipCompressorInputStream gzIn = new GzipCompressorInputStream(fin);
+                 final TarArchiveInputStream tarIn = new TarArchiveInputStream(gzIn)) {
+             for (TarArchiveEntry entry = tarIn.getNextTarEntry(); entry != null; entry = tarIn.getNextTarEntry()) {
+-                final File entryFile = new File(
+-                        destDir + File.separator + trimPathSegments(entry.getName(), leadingPathSegmentsToTrim));
+-                if (entry.isDirectory()) {
+-                    makeDirectories(entryFile);
+-                } else {
+-                    copyFile(tarIn, entry, entryFile);
+-                }
++                handler.handle(tarIn, entry);
+             }
+         }
+     }
+ 
+-    private static void copyFile(final TarArchiveInputStream tarIn, final TarArchiveEntry entry, final File entryFile)
+-            throws IOException {
+-        if (!entryFile.getParentFile().exists()) {
+-            makeDirectories(entryFile.getParentFile());
+-        }
+-
+-        try (final FileOutputStream fos = new FileOutputStream(entryFile)) {
+-            copy(tarIn, fos);
+-
+-            // check for user-executable bit on entry and apply to file
+-            if (isExecutable(entry)) {
+-                makeExecutable(entryFile);
+-            }
+-        }
++    @FunctionalInterface
++    private interface TarEntryHandler {
++        void handle(TarArchiveInputStream tarIn, TarArchiveEntry entry) throws IOException;
+     }
+ 
+-    private static void makeDirectories(final File file) {
+-        if (!file.mkdirs()) {
+-            LOGGER.debug("Did not create directories for {}", file);
++    private static Path resolveTarEntry(final Path destRoot, final TarArchiveEntry entry, final int trim)
++            throws IOException {
++        if (entry.isSymbolicLink() || entry.isLink()) {
++            throw refusal(entry.getName(), "it is a symbolic or hard link");
+         }
++        if (entry.isCharacterDevice() || entry.isBlockDevice() || entry.isFIFO()) {
++            throw refusal(entry.getName(), "it is a device or FIFO");
++        }
++        return resolveEntryTarget(destRoot, entry.getName(), entry.isDirectory(), trim, false);
+     }
+ 
+     public static void unzip(File zipFile, String destDir) throws IOException {
+@@ -109,7 +130,9 @@ public final class ZipUtils {
+      * @param destDir the destination folder
+      * @param leadingPathSegmentsToTrim number of root folders to skip. Example: If all files are in
+      *     generated-resources/home/*, then you may want to skip 2 folders.
+-     * @throws IOException if the archive cannot be expanded
++     * @throws IOException if the archive cannot be expanded, or if it contains an entry that is not a regular file or
++     *     directory, or that would be extracted outside {@code destDir}
++     * @see #unzip(File, String, int, boolean, Pattern)
+      */
+     public static void unzip(File zipFile, String destDir, int leadingPathSegmentsToTrim) throws IOException {
+         unzip(zipFile, destDir, leadingPathSegmentsToTrim, false, null);
+@@ -118,6 +141,20 @@ public final class ZipUtils {
+     /**
+      * Unzips a file
+      *
++     * <p>Extraction is guarded against path traversal ("Zip Slip"):
++     *
++     * <ul>
++     *   <li>Entries that are absolute on the current platform, or that resolve outside {@code destDir}, are refused.
++     *       Both are checked after trimming or flattening, i.e. on the path actually written. {@code ..} segments that
++     *       stay within {@code destDir} are allowed.
++     *   <li>Symbolic links and other special files are refused.
++     *   <li>Writes never follow symbolic links or junctions below {@code destDir}, even ones that already exist.
++     * </ul>
++     *
++     * <p>Entry paths, entry types and existing destination components are validated before anything is written. A
++     * failure during this preflight leaves {@code destDir} untouched. Extraction is not transactional: later I/O
++     * failures, conflicts between archive entries or concurrent destination changes may leave partial output.
++     *
+      * @param zipFile the Zip file
+      * @param destDir the destination folder
+      * @param leadingPathSegmentsToTrim number of root folders to skip. Example: If all files are in
+@@ -125,7 +162,8 @@ public final class ZipUtils {
+      * @param flatten if true all files from zip are extracted directly to destDir without keeping the subdirectories
+      *     structure from the zip file
+      * @param pattern pattern that must be meet by zip entry to be extracted
+-     * @throws IOException if the archive cannot be expanded
++     * @throws IOException if the archive cannot be expanded, or if it contains an entry to be extracted that is not a
++     *     regular file or directory, or that would be extracted outside {@code destDir}
+      */
+     public static void unzip(
+             final File zipFile,
+@@ -134,17 +172,21 @@ public final class ZipUtils {
+             final boolean flatten,
+             final Pattern pattern)
+             throws IOException {
++        final Path destRoot = canonicalRoot(destDir);
+         try (final ZipFile zip = ZipFile.builder().setFile(zipFile).get()) {
+-            final Enumeration<? extends ZipArchiveEntry> entries = zip.getEntries();
+-            while (entries.hasMoreElements()) {
+-                final ZipArchiveEntry zipEntry = entries.nextElement();
+-                if (matches(zipEntry, pattern)) {
+-                    final File file = getFile(destDir, leadingPathSegmentsToTrim, flatten, zipEntry);
+-                    if (zipEntry.isDirectory()) {
+-                        makeDirectories(file);
+-                    } else {
+-                        copyFile(zip, zipEntry, file);
+-                    }
++            final List<ZipArchiveEntry> entries = Collections.list(zip.getEntries()).stream()
++                    .filter(zipEntry -> matches(zipEntry, pattern))
++                    .collect(Collectors.toList());
++            // Preflight entry paths, types and existing destination components before writing anything.
++            for (final ZipArchiveEntry zipEntry : entries) {
++                resolveZipEntry(destRoot, zipEntry, leadingPathSegmentsToTrim, flatten);
++            }
++            for (final ZipArchiveEntry zipEntry : entries) {
++                final Path target = resolveZipEntry(destRoot, zipEntry, leadingPathSegmentsToTrim, flatten);
++                if (zipEntry.isDirectory()) {
++                    createDirectories(destRoot, target, zipEntry.getName());
++                } else {
++                    copyFile(zip, zipEntry, destRoot, target);
+                 }
+             }
+         }
+@@ -154,39 +196,113 @@ public final class ZipUtils {
+         return pattern == null || pattern.matcher(zipEntry.getName()).matches();
+     }
+ 
++    private static Path resolveZipEntry(
++            final Path destRoot, final ZipArchiveEntry zipEntry, final int trim, final boolean flatten)
++            throws IOException {
++        if (zipEntry.isUnixSymlink()) {
++            throw refusal(zipEntry.getName(), "it is a symbolic link");
++        }
++        final int fileType = zipEntry.getUnixMode() & UNIX_FILE_TYPE_MASK;
++        if (fileType != 0 && fileType != UNIX_REGULAR_FILE && fileType != UNIX_DIRECTORY) {
++            throw refusal(zipEntry.getName(), "it is a special file");
++        }
++        return resolveEntryTarget(destRoot, zipEntry.getName(), zipEntry.isDirectory(), trim, flatten);
++    }
++
+     /**
+      * Copies the given entry from the given ZIP file to the given file, preserving the executable flag and the "last
+      * modified" time.
+      *
+      * @param zip the ZIP file
+      * @param zipEntry the entry to be copied
+-     * @param file the destination file
++     * @param destRoot the canonical extraction root
++     * @param target the destination file, within {@code destRoot}
+      * @throws IOException if any I/O fails
+      */
+-    private static void copyFile(final ZipFile zip, final ZipArchiveEntry zipEntry, final File file)
++    private static void copyFile(
++            final ZipFile zip, final ZipArchiveEntry zipEntry, final Path destRoot, final Path target)
+             throws IOException {
+-        // make sure our parent exists in case zipentries are out of order
+-        if (!file.getParentFile().exists()) {
+-            makeDirectories(file.getParentFile());
++        try (final InputStream is = zip.getInputStream(zipEntry)) {
++            writeEntry(destRoot, target, zipEntry.getName(), is);
+         }
++        if (isExecutable(zipEntry)) {
++            makeExecutable(target.toFile());
++        }
++        setLastModified(target.toFile(), zipEntry.getTime());
++    }
++
++    private static Path canonicalRoot(final String destDir) throws IOException {
++        return new File(destDir).getCanonicalFile().toPath();
++    }
+ 
+-        try (final InputStream is = zip.getInputStream(zipEntry);
+-                final OutputStream fos = Files.newOutputStream(file.toPath())) {
+-            copy(is, fos);
+-            if (isExecutable(zipEntry)) {
+-                makeExecutable(file);
++    /**
++     * Resolves the file to which an archive entry should be extracted and checks existing destination components,
++     * without modifying the file system.
++     *
++     * @param destRoot the canonical extraction root
++     * @param entryName the entry name, as found in the archive
++     * @param isDirectory whether the entry is a directory
++     * @param trim the number of leading path segments to remove from the entry name
++     * @param flatten whether to drop all directories from the entry name
++     * @return the normalised target, guaranteed to be within {@code destRoot}
++     * @throws IOException if the entry name is absolute, would be extracted outside {@code destRoot}, or an existing
++     *     destination component is unsuitable
++     */
++    private static Path resolveEntryTarget(
++            final Path destRoot,
++            final String entryName,
++            final boolean isDirectory,
++            final int trim,
++            final boolean flatten)
++            throws IOException {
++        try {
++            String relativePath = trimPathSegments(entryName, trim);
++            if (flatten) {
++                relativePath = flattenPath(relativePath);
+             }
++            final Path target = PathConfinement.resolve(destRoot, relativePath);
++            return isDirectory
++                    ? PathConfinement.validateDirectory(destRoot, target)
++                    : PathConfinement.validateFile(destRoot, target);
++        } catch (IOException e) {
++            throw refusal(entryName, e.getMessage(), e);
+         }
+-        setLastModified(file, zipEntry.getTime());
+     }
+ 
+-    private static File getFile(
+-            final String destDir, final int leadingPathSegmentsToTrim, final boolean flatten, final ZipEntry zipEntry) {
+-        String zipPath = trimPathSegments(zipEntry.getName(), leadingPathSegmentsToTrim);
+-        if (flatten) {
+-            zipPath = flattenPath(zipPath);
++    private static void createDirectories(final Path destRoot, final Path directory, final String entryName)
++            throws IOException {
++        try {
++            PathConfinement.createDirectories(destRoot, directory);
++        } catch (IOException e) {
++            throw extractionFailure(entryName, e);
++        }
++    }
++
++    private static void writeEntry(
++            final Path destRoot, final Path target, final String entryName, final InputStream content)
++            throws IOException {
++        final OutputStream out;
++        try {
++            out = PathConfinement.newOutputStream(destRoot, target);
++        } catch (IOException e) {
++            throw extractionFailure(entryName, e);
++        }
++        try (OutputStream fileOut = out) {
++            copy(content, fileOut);
+         }
+-        return new File(destDir + File.separatorChar + zipPath);
++    }
++
++    private static IOException refusal(final String entryName, final String reason) {
++        return refusal(entryName, reason, null);
++    }
++
++    private static IOException refusal(final String entryName, final String reason, final Throwable cause) {
++        return new IOException(String.format("Refusing to extract archive entry '%s': %s", entryName, reason), cause);
++    }
++
++    private static IOException extractionFailure(final String entryName, final IOException cause) {
++        return new IOException(
++                String.format("Could not extract archive entry '%s': %s", entryName, cause.getMessage()), cause);
+     }
+ 
+     private static boolean isExecutable(final TarArchiveEntry tarArchiveEntry) {
+@@ -430,7 +546,7 @@ public final class ZipUtils {
+     }
+ 
+     private static String flattenPath(String zipPath) {
+-        return zipPath.substring(Math.max(zipPath.lastIndexOf('/'), 0));
++        return zipPath.substring(zipPath.lastIndexOf('/') + 1);
+     }
+ 
+     private ZipUtils() {}
+diff --git a/amps-maven-plugin/src/test/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/SpringXmlToJavaConverterTest.java b/amps-maven-plugin/src/test/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/SpringXmlToJavaConverterTest.java
+index 4df31078cc..9c72345be1 100644
+--- a/amps-maven-plugin/src/test/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/SpringXmlToJavaConverterTest.java
++++ b/amps-maven-plugin/src/test/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/SpringXmlToJavaConverterTest.java
+@@ -3,10 +3,19 @@ package com.atlassian.maven.plugins.amps.transform.executor.xmltojava;
+ import static com.atlassian.maven.plugins.amps.transform.executor.xmltojava.AbstractConverterTest.getXmlPath;
+ import static com.atlassian.maven.plugins.amps.transform.executor.xmltojava.AbstractConverterTest.readFileAsString;
+ import static com.atlassian.maven.plugins.amps.transform.executor.xmltojava.TemplateUtil.readResourceAsString;
++import static org.hamcrest.MatcherAssert.assertThat;
++import static org.hamcrest.Matchers.containsString;
+ import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
+ import static org.junit.jupiter.api.Assertions.assertTrue;
++import static org.junit.jupiter.api.Assumptions.assumeTrue;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.Mockito.CALLS_REAL_METHODS;
+ import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.mockStatic;
+ 
++import java.io.IOException;
+ import java.nio.file.Files;
+ import java.nio.file.Path;
+ import java.util.List;
+@@ -15,6 +24,7 @@ import org.apache.maven.plugin.logging.Log;
+ import org.junit.jupiter.api.BeforeEach;
+ import org.junit.jupiter.api.Test;
+ import org.junit.jupiter.api.io.TempDir;
++import org.mockito.MockedStatic;
+ import com.google.common.collect.ImmutableList;
+ 
+ class SpringXmlToJavaConverterTest {
+@@ -95,4 +105,89 @@ class SpringXmlToJavaConverterTest {
+             assertTrue(Files.notExists(xmlFilePath), resourceName + " should be deleted after conversion");
+         }
+     }
++
++    @Test
++    void convertPreservesExternalXmlBehindSymlinkedResourceDirectory() throws Exception {
++        Path outsideDir = tempDir.resolve("outside-spring");
++        Files.move(springXmlDir, outsideDir);
++        createSymlinkOrSkip(springXmlDir, outsideDir);
++
++        IOException e = assertThrows(IOException.class, () -> converter.convert(resourcesDir));
++
++        assertThat(e.getMessage(), containsString("symbolic link"));
++        assertOriginalXmlUnchanged(outsideDir);
++        assertTrue(Files.notExists(springJavaDir), "Validation must precede source generation");
++        assertTrue(Files.notExists(outsideDir.resolve("spring.xml")));
++    }
++
++    @Test
++    void convertPreservesXmlWhenSpringXmlIsADanglingSymlink() throws Exception {
++        Path missingTarget = tempDir.resolve("missing-spring.xml");
++        createSymlinkOrSkip(springXmlDir.resolve("spring.xml"), missingTarget);
++
++        assertThrows(IOException.class, () -> converter.convert(resourcesDir));
++
++        assertOriginalXmlUnchanged(springXmlDir);
++        assertTrue(Files.notExists(springJavaDir));
++        assertTrue(Files.notExists(missingTarget));
++    }
++
++    @Test
++    void convertPreservesXmlWhenFinalOutputWriteFails() throws Exception {
++        IOException failure = new IOException("Simulated output failure");
++        try (MockedStatic<TemplateUtil> templates = mockStatic(TemplateUtil.class, CALLS_REAL_METHODS)) {
++            templates
++                    .when(() -> TemplateUtil.writeTemplateToPath(
++                            eq(resourcesDir), eq(springXmlDir.resolve("spring.xml")), any(), any()))
++                    .thenThrow(failure);
++
++            assertEquals(failure, assertThrows(IOException.class, () -> converter.convert(resourcesDir)));
++        }
++
++        assertOriginalXmlUnchanged(springXmlDir);
++        assertTrue(Files.exists(springJavaDir.resolve("SpringBeans.java")));
++        assertTrue(Files.notExists(springXmlDir.resolve("spring.xml")));
++    }
++
++    private void assertOriginalXmlUnchanged(Path directory) throws Exception {
++        for (String resourceName : TEST_XML_FILES) {
++            assertEquals(
++                    readFileAsString(getXmlPath(resourceName)),
++                    readFileAsString(directory.resolve(resourceName)),
++                    resourceName + " should remain unchanged");
++        }
++    }
++
++    private static void createSymlinkOrSkip(Path link, Path target) {
++        try {
++            Files.createSymbolicLink(link, target);
++        } catch (IOException | UnsupportedOperationException e) {
++            assumeTrue(false, "Symbolic links are not supported on this platform");
++        }
++    }
++
++    @Test
++    void convertRefusesToWriteThroughSymlinkedBasePackage() throws Exception {
++        // A base package that is a symbolic link to a directory outside the source directory
++        Path project = tempDir.resolve("symlinked-project");
++        Path projectSrcDir = Files.createDirectories(project.resolve("src/main/java"));
++        Path outsideDir = Files.createDirectories(tempDir.resolve("outside"));
++        Files.write(outsideDir.resolve("Service.java"), "dummy-content".getBytes());
++        try {
++            Files.createSymbolicLink(projectSrcDir.resolve("linked"), outsideDir);
++        } catch (IOException | UnsupportedOperationException e) {
++            assumeTrue(false, "Symbolic links are not supported on this platform");
++        }
++        Path projectResourcesDir = project.resolve("src/main/resources");
++        Path projectSpringXmlDir = Files.createDirectories(projectResourcesDir.resolve("META-INF/spring"));
++        for (String resourceName : TEST_XML_FILES) {
++            Files.copy(getXmlPath(resourceName), projectSpringXmlDir.resolve(resourceName));
++        }
++
++        IOException e = assertThrows(IOException.class, () -> converter.convert(projectResourcesDir));
++
++        assertThat(e.getMessage(), containsString("symbolic link"));
++        assertTrue(Files.notExists(outsideDir.resolve("spring")), "Nothing should be written outside the sources");
++        assertTrue(Files.notExists(projectSpringXmlDir.resolve("spring.xml")), "spring.xml should not be written");
++    }
+ }
+diff --git a/amps-maven-plugin/src/test/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/TemplateUtilTest.java b/amps-maven-plugin/src/test/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/TemplateUtilTest.java
+new file mode 100644
+index 0000000000..2a649cbb2d
+--- /dev/null
++++ b/amps-maven-plugin/src/test/java/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/TemplateUtilTest.java
+@@ -0,0 +1,82 @@
++package com.atlassian.maven.plugins.amps.transform.executor.xmltojava;
++
++import static java.nio.charset.StandardCharsets.UTF_8;
++import static org.hamcrest.MatcherAssert.assertThat;
++import static org.hamcrest.Matchers.containsString;
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assumptions.assumeTrue;
++
++import java.io.IOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.ValueSource;
++import com.google.common.collect.ImmutableMap;
++
++class TemplateUtilTest {
++
++    private static final String TEMPLATE = "SpringXml.sub";
++
++    @TempDir
++    Path tempDir;
++
++    @ParameterizedTest
++    @ValueSource(
++            strings = {
++                "",
++                ".",
++                "..",
++                "/com/atlassian/maven/plugins/amps/transform/executor/xmltojava/SpringXml.sub",
++                "../SpringXml.sub",
++                "nested/SpringXml.sub",
++                "..\\SpringXml.sub"
++            })
++    void getProcessedTemplateRejectsNonSimpleNames(final String template) {
++        assertThrows(
++                IllegalArgumentException.class, () -> TemplateUtil.getProcessedTemplate(template, ImmutableMap.of()));
++    }
++
++    @Test
++    void writeTemplateToPathWritesProcessedTemplate() throws IOException {
++        final Path file = tempDir.resolve("META-INF/spring/spring.xml");
++
++        TemplateUtil.writeTemplateToPath(
++                tempDir, file, TEMPLATE, ImmutableMap.of("qualifiedClassName", "com.example.Beans"));
++
++        assertThat(new String(Files.readAllBytes(file), UTF_8), containsString("com.example.Beans"));
++    }
++
++    @Test
++    void writeTemplateToPathRejectsFileOutsideRoot() throws IOException {
++        final Path root = Files.createDirectories(tempDir.resolve("root"));
++        final Path outsideFile = tempDir.resolve("outside.xml");
++
++        assertThrows(
++                IOException.class,
++                () -> TemplateUtil.writeTemplateToPath(root, outsideFile, TEMPLATE, ImmutableMap.of()));
++
++        assertFalse(Files.exists(outsideFile));
++    }
++
++    @Test
++    void writeTemplateToPathRefusesToWriteThroughSymlink() throws IOException {
++        final Path root = Files.createDirectories(tempDir.resolve("root"));
++        final Path victim = Files.write(tempDir.resolve("victim.txt"), "original".getBytes(UTF_8));
++        final Path link = root.resolve("spring.xml");
++        try {
++            Files.createSymbolicLink(link, victim);
++        } catch (IOException | UnsupportedOperationException e) {
++            assumeTrue(false, "Symbolic links are not supported on this platform");
++        }
++
++        assertThrows(
++                IOException.class, () -> TemplateUtil.writeTemplateToPath(root, link, TEMPLATE, ImmutableMap.of()));
++
++        assertEquals("original", new String(Files.readAllBytes(victim), UTF_8));
++    }
++}
+diff --git a/amps-maven-plugin/src/test/java/com/atlassian/maven/plugins/amps/util/PathConfinementTest.java b/amps-maven-plugin/src/test/java/com/atlassian/maven/plugins/amps/util/PathConfinementTest.java
+new file mode 100644
+index 0000000000..606dc1152e
+--- /dev/null
++++ b/amps-maven-plugin/src/test/java/com/atlassian/maven/plugins/amps/util/PathConfinementTest.java
+@@ -0,0 +1,246 @@
++package com.atlassian.maven.plugins.amps.util;
++
++import static java.nio.charset.StandardCharsets.UTF_8;
++import static org.hamcrest.MatcherAssert.assertThat;
++import static org.hamcrest.Matchers.containsString;
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++import static org.junit.jupiter.api.Assumptions.assumeTrue;
++
++import java.io.IOException;
++import java.io.OutputStream;
++import java.nio.file.Files;
++import java.nio.file.Path;
++
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.condition.DisabledOnOs;
++import org.junit.jupiter.api.condition.EnabledOnOs;
++import org.junit.jupiter.api.condition.OS;
++import org.junit.jupiter.api.io.TempDir;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.ValueSource;
++
++class PathConfinementTest {
++
++    @TempDir
++    Path tempDir;
++
++    private Path root;
++    private Path outside;
++
++    @BeforeEach
++    void setUp() throws IOException {
++        root = Files.createDirectories(tempDir.resolve("root"));
++        outside = Files.createDirectories(tempDir.resolve("outside"));
++    }
++
++    @ParameterizedTest
++    @ValueSource(strings = {"/etc/passwd", "//server/share"})
++    void resolveRejectsAbsolutePaths(final String path) {
++        final IOException e = assertThrows(IOException.class, () -> PathConfinement.resolve(root, path));
++        assertThat(e.getMessage(), containsString("absolute path"));
++    }
++
++    @ParameterizedTest
++    @EnabledOnOs(OS.WINDOWS)
++    @ValueSource(strings = {"\\etc\\passwd", "\\\\server\\share\\file", "C:", "c:\\x", "C:x", "a:b.txt"})
++    void resolveRejectsWindowsAbsolutePathsOnWindows(final String path) {
++        assertThrows(IOException.class, () -> PathConfinement.resolve(root, path));
++    }
++
++    @ParameterizedTest
++    @DisabledOnOs(OS.WINDOWS)
++    @ValueSource(strings = {"a:b.txt", "C:x", "\\etc\\passwd", "..\\x"})
++    void resolveAcceptsNamesThatAreOnlyAbsoluteOnWindowsElsewhere(final String path) throws IOException {
++        assertEquals(root.resolve(path).toAbsolutePath(), PathConfinement.resolve(root, path));
++    }
++
++    @ParameterizedTest
++    @ValueSource(strings = {"file.txt", "a/b/c.txt", "..hidden", "~"})
++    void resolveAcceptsRelativePaths(final String path) throws IOException {
++        assertEquals(root.resolve(path).toAbsolutePath(), PathConfinement.resolve(root, path));
++    }
++
++    @Test
++    void resolveDoesNotExpandTilde() throws IOException {
++        assertEquals(root.resolve("~").resolve("path").toAbsolutePath(), PathConfinement.resolve(root, "~/path"));
++    }
++
++    @Test
++    void resolveNormalisesContainedParentSegments() throws IOException {
++        assertEquals(root.resolve("b").toAbsolutePath(), PathConfinement.resolve(root, "a/../b"));
++    }
++
++    @Test
++    void resolveOfEmptyPathIsRoot() throws IOException {
++        assertEquals(root.toAbsolutePath(), PathConfinement.resolve(root, ""));
++    }
++
++    @ParameterizedTest
++    @ValueSource(strings = {"..", "../outside/file", "a/../../outside", "../root-sibling/file"})
++    void resolveRejectsEscapingPaths(final String path) {
++        final IOException e = assertThrows(IOException.class, () -> PathConfinement.resolve(root, path));
++        assertThat(e.getMessage(), containsString("outside the target directory"));
++    }
++
++    @Test
++    void requireWithinRejectsSiblingWithSamePrefix() {
++        assertThrows(
++                IOException.class,
++                () -> PathConfinement.requireWithin(
++                        root, tempDir.resolve("root-sibling").resolve("file")));
++    }
++
++    @Test
++    void validationDoesNotCreateMissingRootOrDirectories() throws IOException {
++        final Path missingRoot = tempDir.resolve("missing-root");
++
++        PathConfinement.validateDirectory(missingRoot, missingRoot.resolve("a/b"));
++        PathConfinement.validateFile(missingRoot, missingRoot.resolve("a/b/file.txt"));
++
++        assertFalse(Files.exists(missingRoot));
++    }
++
++    @Test
++    void validateFilePreservesExistingContent() throws IOException {
++        final Path file = Files.writeString(root.resolve("file.txt"), "original");
++
++        PathConfinement.validateFile(root, file);
++
++        assertEquals("original", Files.readString(file));
++    }
++
++    @Test
++    void validationRejectsExistingFileWhereDirectoryIsRequired() throws IOException {
++        final Path file = Files.writeString(root.resolve("file.txt"), "original");
++
++        assertThrows(IOException.class, () -> PathConfinement.validateDirectory(root, file));
++        assertThrows(IOException.class, () -> PathConfinement.validateFile(root, file.resolve("nested.txt")));
++
++        assertEquals("original", Files.readString(file));
++    }
++
++    @Test
++    void validateFileRejectsDanglingSymlink() throws IOException {
++        final Path missingTarget = outside.resolve("missing.txt");
++        final Path link = root.resolve("link");
++        createSymlinkOrSkip(link, missingTarget);
++
++        assertThrows(IOException.class, () -> PathConfinement.validateFile(root, link));
++
++        assertFalse(Files.exists(missingTarget));
++        assertTrue(Files.isSymbolicLink(link));
++    }
++
++    @Test
++    void validationAllowsTrustedSymlinkRootWithoutCreatingDescendants() throws IOException {
++        final Path linkedRoot = tempDir.resolve("linked-root");
++        createSymlinkOrSkip(linkedRoot, outside);
++
++        PathConfinement.validateDirectory(linkedRoot, linkedRoot.resolve("nested"));
++        PathConfinement.validateFile(linkedRoot, linkedRoot.resolve("nested/file.txt"));
++
++        assertFalse(Files.exists(outside.resolve("nested")));
++    }
++
++    @Test
++    void createDirectoriesCreatesNestedDirectoriesAndRoot() throws IOException {
++        final Path newRoot = tempDir.resolve("new-root");
++
++        PathConfinement.createDirectories(newRoot, newRoot.resolve("a/b/c"));
++
++        assertTrue(Files.isDirectory(newRoot.resolve("a/b/c")));
++    }
++
++    @Test
++    void createDirectoriesRejectsSymlinkedComponent() throws IOException {
++        createSymlinkOrSkip(root.resolve("link"), outside);
++
++        final IOException e = assertThrows(
++                IOException.class, () -> PathConfinement.createDirectories(root, root.resolve("link/nested")));
++
++        assertThat(e.getMessage(), containsString("symbolic link"));
++        assertFalse(Files.exists(outside.resolve("nested")));
++    }
++
++    @Test
++    void createDirectoriesRejectsFileComponent() throws IOException {
++        Files.write(root.resolve("file"), new byte[0]);
++
++        final IOException e = assertThrows(
++                IOException.class, () -> PathConfinement.createDirectories(root, root.resolve("file/nested")));
++
++        assertThat(e.getMessage(), containsString("not a directory"));
++    }
++
++    @Test
++    void createDirectoriesAllowsRootBelowSymlink() throws IOException {
++        final Path linkedRoot = tempDir.resolve("linked-root");
++        createSymlinkOrSkip(linkedRoot, outside);
++
++        PathConfinement.createDirectories(linkedRoot, linkedRoot.resolve("nested"));
++
++        assertTrue(Files.isDirectory(outside.resolve("nested")));
++    }
++
++    @Test
++    void newOutputStreamWritesAndTruncatesFile() throws IOException {
++        final Path file = root.resolve("a/file.txt");
++        write(file, "a longer original content");
++
++        write(file, "new");
++
++        assertEquals("new", new String(Files.readAllBytes(file), UTF_8));
++    }
++
++    @Test
++    void newOutputStreamRejectsSymlinkedFile() throws IOException {
++        final Path victim = Files.write(outside.resolve("victim.txt"), "original".getBytes(UTF_8));
++        createSymlinkOrSkip(root.resolve("file.txt"), victim);
++
++        final IOException e = assertThrows(IOException.class, () -> write(root.resolve("file.txt"), "evil"));
++
++        assertThat(e.getMessage(), containsString("symbolic link"));
++        assertEquals("original", new String(Files.readAllBytes(victim), UTF_8));
++    }
++
++    @Test
++    void newOutputStreamRejectsFileOutsideRoot() {
++        assertThrows(IOException.class, () -> write(outside.resolve("file.txt"), "evil"));
++
++        assertFalse(Files.exists(outside.resolve("file.txt")));
++    }
++
++    @Test
++    void newOutputStreamRejectsRootItself() {
++        final IOException e = assertThrows(IOException.class, () -> write(root, "evil"));
++
++        assertThat(e.getMessage(), containsString("target directory itself"));
++    }
++
++    @Test
++    void newOutputStreamRejectsExistingDirectory() throws IOException {
++        Files.createDirectories(root.resolve("dir"));
++
++        final IOException e = assertThrows(IOException.class, () -> write(root.resolve("dir"), "evil"));
++
++        assertThat(e.getMessage(), containsString("a directory"));
++    }
++
++    private void write(final Path file, final String content) throws IOException {
++        try (OutputStream out = PathConfinement.newOutputStream(root, file)) {
++            out.write(content.getBytes(UTF_8));
++        }
++    }
++
++    private static void createSymlinkOrSkip(final Path link, final Path target) {
++        try {
++            Files.createSymbolicLink(link, target);
++        } catch (IOException | UnsupportedOperationException e) {
++            assumeTrue(false, "Symbolic links are not supported on this platform");
++        }
++    }
++}
+diff --git a/amps-maven-plugin/src/test/java/com/atlassian/maven/plugins/amps/util/TestZipUtils.java b/amps-maven-plugin/src/test/java/com/atlassian/maven/plugins/amps/util/TestZipUtils.java
+index 2310f75648..ad79b6e783 100644
+--- a/amps-maven-plugin/src/test/java/com/atlassian/maven/plugins/amps/util/TestZipUtils.java
++++ b/amps-maven-plugin/src/test/java/com/atlassian/maven/plugins/amps/util/TestZipUtils.java
+@@ -3,6 +3,9 @@ package com.atlassian.maven.plugins.amps.util;
+ import static java.util.stream.Collectors.toList;
+ import static org.hamcrest.MatcherAssert.assertThat;
+ import static org.hamcrest.Matchers.allOf;
++import static org.hamcrest.Matchers.arrayContainingInAnyOrder;
++import static org.hamcrest.Matchers.containsString;
++import static org.hamcrest.Matchers.emptyArray;
+ import static org.hamcrest.Matchers.equalTo;
+ import static org.hamcrest.Matchers.hasItems;
+ import static org.hamcrest.Matchers.iterableWithSize;
+@@ -12,9 +15,11 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
+ 
+ import java.io.File;
+ import java.io.IOException;
++import java.io.OutputStream;
+ import java.net.URISyntaxException;
+ import java.net.URL;
+ import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
+ import java.util.Collections;
+ import java.util.Enumeration;
+ import java.util.List;
+@@ -22,14 +27,31 @@ import java.util.regex.Pattern;
+ import java.util.zip.ZipEntry;
+ import java.util.zip.ZipFile;
+ 
++import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
++import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
++import org.apache.commons.compress.archivers.tar.TarConstants;
++import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
++import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream;
++import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream;
+ import org.apache.commons.io.FileUtils;
+ import org.junit.jupiter.api.BeforeEach;
+ import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.condition.DisabledOnOs;
++import org.junit.jupiter.api.condition.EnabledOnOs;
++import org.junit.jupiter.api.condition.OS;
+ import org.junit.jupiter.api.io.TempDir;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.ValueSource;
+ import com.google.common.collect.Lists;
+ 
+ @SuppressWarnings("Duplicates")
+ public class TestZipUtils {
++    @SuppressWarnings("OctalInteger")
++    private static final int UNIX_SYMLINK_MODE = 0120777;
++
++    @SuppressWarnings("OctalInteger")
++    private static final int UNIX_FIFO_MODE = 0010644;
++
+     private static final int NUM_FILES = 2;
+     private static final int NUM_FOLDERS = 4;
+     private static final int NUM_FOLDERS_NESTED_PREFIX = NUM_FOLDERS + 1;
+@@ -497,6 +519,427 @@ public class TestZipUtils {
+         assertEquals(1, nestedRoots, "The number of nested roots should be detected");
+     }
+ 
++    @Test
++    public void unzipRejectsEntryEscapingDestination() throws IOException {
++        // Reproduces the <dataPath>/<productDataPath> home-data ZIP finding
++        final File unzipDir = newFolder(tempDir, "unzip-traversal");
++        final File zipFile = createZip("traversal.zip", "../zip-escape-marker");
++
++        final IOException e =
++                assertThrows(IOException.class, () -> ZipUtils.unzip(zipFile, unzipDir.getAbsolutePath()));
++
++        assertThat(e.getMessage(), containsString("../zip-escape-marker"));
++        assertFalse(new File(tempDir, "zip-escape-marker").exists());
++    }
++
++    @Test
++    public void unzipRejectsEntryEscapingIntoSiblingWithSamePrefix() throws IOException {
++        final File unzipDir = newFolder(tempDir, "dest");
++        final File zipFile = createZip("sibling.zip", "../dest-evil/marker");
++
++        assertThrows(IOException.class, () -> ZipUtils.unzip(zipFile, unzipDir.getAbsolutePath()));
++
++        assertFalse(new File(tempDir, "dest-evil/marker").exists());
++    }
++
++    @Test
++    public void unzipRejectsEntryEscapingDestinationWhenFlattening() throws IOException {
++        final File unzipDir = newFolder(tempDir, "unzip-flatten-traversal");
++        final File zipFile = createZip("flatten-traversal.zip", "nested/..");
++
++        final IOException e = assertThrows(
++                IOException.class, () -> ZipUtils.unzip(zipFile, unzipDir.getAbsolutePath(), 0, true, null));
++
++        assertThat(e.getMessage(), containsString("outside the target directory"));
++    }
++
++    @Test
++    public void unzipRejectsEntryEscapingThroughExistingSymlink() throws IOException {
++        final File unzipDir = newFolder(tempDir, "unzip-symlink");
++        final File outsideDir = newFolder(tempDir, "outside");
++        try {
++            Files.createSymbolicLink(new File(unzipDir, "link").toPath(), outsideDir.toPath());
++        } catch (IOException | UnsupportedOperationException e) {
++            assumeTrue(false, "Symbolic links are not supported on this platform");
++        }
++        final File zipFile = createZip("symlink.zip", "link/marker");
++
++        assertThrows(IOException.class, () -> ZipUtils.unzip(zipFile, unzipDir.getAbsolutePath()));
++
++        assertFalse(new File(outsideDir, "marker").exists());
++    }
++
++    @Test
++    public void unzipAllowsParentSegmentsThatStayWithinDestination() throws IOException {
++        final File unzipDir = newFolder(tempDir, "unzip-contained-dots");
++        final File zipFile = createZip("contained-dots.zip", "nested/../inside.txt");
++
++        ZipUtils.unzip(zipFile, unzipDir.getAbsolutePath());
++
++        assertTrue(new File(unzipDir, "inside.txt").isFile());
++    }
++
++    @ParameterizedTest
++    @ValueSource(strings = {"/absolute.txt", "//server/share/unc.txt"})
++    public void unzipRejectsAbsoluteEntry(final String entryName) throws IOException {
++        final File unzipDir = newFolder(tempDir, "unzip-absolute");
++        final File zipFile = createZip("absolute.zip", entryName);
++
++        final IOException e =
++                assertThrows(IOException.class, () -> ZipUtils.unzip(zipFile, unzipDir.getAbsolutePath()));
++
++        assertThat(e.getMessage(), containsString("Refusing to extract archive entry"));
++        assertThat(unzipDir.list(), emptyArray());
++    }
++
++    @ParameterizedTest
++    @EnabledOnOs(OS.WINDOWS)
++    @ValueSource(strings = {"\\absolute.txt", "\\\\server\\share\\unc.txt", "C:/drive.txt", "C:drive.txt"})
++    public void unzipRejectsWindowsAbsoluteEntryOnWindows(final String entryName) throws IOException {
++        final File unzipDir = newFolder(tempDir, "unzip-windows-absolute");
++        final File zipFile = createZip("windows-absolute.zip", entryName);
++
++        assertThrows(IOException.class, () -> ZipUtils.unzip(zipFile, unzipDir.getAbsolutePath()));
++
++        assertThat(unzipDir.list(), emptyArray());
++    }
++
++    @Test
++    @DisabledOnOs(OS.WINDOWS)
++    public void unzipExtractsEntryWithDriveLikeNameOutsideWindows() throws IOException {
++        final File unzipDir = newFolder(tempDir, "unzip-colon");
++        final File zipFile = createZip("colon.zip", "a:b.txt");
++
++        ZipUtils.unzip(zipFile, unzipDir.getAbsolutePath());
++
++        assertTrue(new File(unzipDir, "a:b.txt").isFile());
++    }
++
++    @Test
++    public void unzipExtractsTildeEntryLiterally() throws IOException {
++        final File unzipDir = newFolder(tempDir, "unzip-tilde");
++        final File zipFile = createZip("tilde.zip", "~/path");
++
++        ZipUtils.unzip(zipFile, unzipDir.getAbsolutePath());
++
++        assertTrue(new File(unzipDir, "~/path").isFile());
++    }
++
++    @Test
++    public void unzipChecksAbsolutePathsAfterTrimming() throws IOException {
++        final File unzipDir = newFolder(tempDir, "unzip-absolute-trimmed");
++        final File zipFile = createZip("absolute-trimmed.zip", "/etc/passwd");
++
++        // Trimming the leading (empty) segment leaves "etc/passwd", which is within the destination
++        ZipUtils.unzip(zipFile, unzipDir.getAbsolutePath(), 1);
++
++        assertTrue(new File(unzipDir, "etc/passwd").isFile());
++    }
++
++    @Test
++    public void unzipRejectsEntryThatIsAbsoluteOnceTrimmed() throws IOException {
++        final File unzipDir = newFolder(tempDir, "unzip-absolute-once-trimmed");
++        final File zipFile = createZip("absolute-once-trimmed.zip", "home//etc/passwd");
++
++        final IOException e =
++                assertThrows(IOException.class, () -> ZipUtils.unzip(zipFile, unzipDir.getAbsolutePath(), 1));
++
++        assertThat(e.getMessage(), containsString("absolute path"));
++        assertThat(unzipDir.list(), emptyArray());
++    }
++
++    @Test
++    public void unzipRejectsSymlinkEntry() throws IOException {
++        final File unzipDir = newFolder(tempDir, "unzip-symlink-entry");
++        final File zipFile = createZip("symlink-entry.zip", zipEntry("link", UNIX_SYMLINK_MODE, "/etc"));
++
++        final IOException e =
++                assertThrows(IOException.class, () -> ZipUtils.unzip(zipFile, unzipDir.getAbsolutePath()));
++
++        assertThat(e.getMessage(), containsString("symbolic link"));
++        assertThat(unzipDir.list(), emptyArray());
++    }
++
++    @Test
++    public void unzipRejectsSpecialFileEntry() throws IOException {
++        final File unzipDir = newFolder(tempDir, "unzip-fifo-entry");
++        final File zipFile = createZip("fifo-entry.zip", zipEntry("fifo", UNIX_FIFO_MODE, ""));
++
++        final IOException e =
++                assertThrows(IOException.class, () -> ZipUtils.unzip(zipFile, unzipDir.getAbsolutePath()));
++
++        assertThat(e.getMessage(), containsString("special file"));
++    }
++
++    @Test
++    public void unzipWritesNothingIfAnyEntryIsRefused() throws IOException {
++        final File unzipDir = newFolder(tempDir, "unzip-all-or-nothing");
++        final File zipFile = createZip(
++                "all-or-nothing.zip", zipEntry("good/file.txt", 0, "good"), zipEntry("../evil.txt", 0, "evil"));
++
++        assertThrows(IOException.class, () -> ZipUtils.unzip(zipFile, unzipDir.getAbsolutePath()));
++
++        assertThat(unzipDir.list(), emptyArray());
++        assertFalse(new File(tempDir, "evil.txt").exists());
++    }
++
++    @Test
++    public void unzipIgnoresRefusableEntriesThatDoNotMatchThePattern() throws IOException {
++        final File unzipDir = newFolder(tempDir, "unzip-pattern");
++        final File zipFile = createZip(
++                "pattern.zip", zipEntry("META-INF/spring/context.xml", 0, "xml"), zipEntry("../evil.txt", 0, "evil"));
++
++        ZipUtils.unzip(zipFile, unzipDir.getAbsolutePath(), 0, false, Pattern.compile("META-INF/spring/.*\\.xml"));
++
++        assertTrue(new File(unzipDir, "META-INF/spring/context.xml").isFile());
++        assertFalse(new File(tempDir, "evil.txt").exists());
++    }
++
++    @ParameterizedTest
++    @ValueSource(strings = {"link/marker", "link", "link/"})
++    public void unzipPreservesEarlierFilesWhenLaterTargetIsSymlinked(final String entryName) throws IOException {
++        final File unzipDir = newFolder(tempDir, "unzip-preflight");
++        final File original = new File(unzipDir, "first.txt");
++        Files.writeString(original.toPath(), "original");
++        final File outside = newFolder(tempDir, "outside-preflight");
++        createSymlinkOrSkip(new File(unzipDir, "link"), outside);
++        final File archive = createZip(
++                "preflight.zip",
++                zipEntry("first.txt", 0, "replacement"),
++                zipEntry(entryName, 0, entryName.endsWith("/") ? "" : "replacement"));
++
++        final IOException e = assertThrows(IOException.class, () -> ZipUtils.unzip(archive, unzipDir.getPath()));
++
++        assertThat(e.getMessage(), containsString(entryName));
++        assertEquals("original", Files.readString(original.toPath()));
++        assertThat(outside.list(), emptyArray());
++    }
++
++    @Test
++    public void unzipRefusesToTraverseExistingSymlinkEvenIfItPointsInside() throws IOException {
++        final File unzipDir = newFolder(tempDir, "unzip-inner-symlink");
++        final File innerDir = newFolder(unzipDir, "inner");
++        createSymlinkOrSkip(new File(unzipDir, "link"), innerDir);
++        final File zipFile = createZip("inner-symlink.zip", "link/marker");
++
++        final IOException e =
++                assertThrows(IOException.class, () -> ZipUtils.unzip(zipFile, unzipDir.getAbsolutePath()));
++
++        assertThat(e.getMessage(), containsString("symbolic link"));
++        assertFalse(new File(innerDir, "marker").exists());
++    }
++
++    @Test
++    public void unzipRefusesToOverwriteExistingSymlinkedFile() throws IOException {
++        final File unzipDir = newFolder(tempDir, "unzip-symlinked-file");
++        final File outsideFile = new File(newFolder(tempDir, "outside-file"), "victim.txt");
++        Files.write(outsideFile.toPath(), "original".getBytes(StandardCharsets.UTF_8));
++        createSymlinkOrSkip(new File(unzipDir, "marker"), outsideFile);
++        final File zipFile = createZip("symlinked-file.zip", "marker");
++
++        assertThrows(IOException.class, () -> ZipUtils.unzip(zipFile, unzipDir.getAbsolutePath()));
++
++        assertEquals("original", FileUtils.readFileToString(outsideFile, StandardCharsets.UTF_8));
++    }
++
++    @Test
++    public void unzipRejectsFileEntryResolvingToDestinationItself() throws IOException {
++        final File unzipDir = newFolder(tempDir, "unzip-root-file");
++        final File zipFile = createZip("root-file.zip", "nested/..");
++
++        final IOException e =
++                assertThrows(IOException.class, () -> ZipUtils.unzip(zipFile, unzipDir.getAbsolutePath()));
++
++        assertThat(e.getMessage(), containsString("target directory itself"));
++    }
++
++    @Test
++    public void unzipFlattensEntries() throws IOException {
++        final File unzipDir = newFolder(tempDir, "unzip-flatten");
++        final File zipFile = createZip(
++                "flatten.zip", zipEntry("a/b/", 0, ""), zipEntry("a/b/c.txt", 0, "c"), zipEntry("d.txt", 0, "d"));
++
++        ZipUtils.unzip(zipFile, unzipDir.getAbsolutePath(), 0, true, null);
++
++        assertThat(unzipDir.list(), arrayContainingInAnyOrder("c.txt", "d.txt"));
++    }
++
++    @Test
++    public void untargzRejectsSymlinkEntry() throws IOException {
++        final File sdkHome = newFolder(tempDir, "sdk-home-symlink");
++        final File targz = createTarGz("symlink.tar.gz", tarLink("sdk/link", TarConstants.LF_SYMLINK, "/etc"));
++
++        final IOException e =
++                assertThrows(IOException.class, () -> ZipUtils.untargz(targz, sdkHome.getAbsolutePath(), 1));
++
++        assertThat(e.getMessage(), containsString("symbolic or hard link"));
++        assertThat(sdkHome.list(), emptyArray());
++    }
++
++    @Test
++    public void untargzRejectsHardLinkEntry() throws IOException {
++        final File sdkHome = newFolder(tempDir, "sdk-home-hardlink");
++        final File targz = createTarGz("hardlink.tar.gz", tarLink("sdk/hard", TarConstants.LF_LINK, "/etc/hosts"));
++
++        final IOException e =
++                assertThrows(IOException.class, () -> ZipUtils.untargz(targz, sdkHome.getAbsolutePath(), 1));
++
++        assertThat(e.getMessage(), containsString("symbolic or hard link"));
++        assertThat(sdkHome.list(), emptyArray());
++    }
++
++    @Test
++    public void untargzWritesNothingIfAnyEntryIsRefused() throws IOException {
++        final File sdkHome = newFolder(tempDir, "sdk-home-all-or-nothing");
++        final File targz =
++                createTarGz("all-or-nothing.tar.gz", tarFile("sdk/bin/atlas-run"), tarFile("sdk/../tar-escape-marker"));
++
++        assertThrows(IOException.class, () -> ZipUtils.untargz(targz, sdkHome.getAbsolutePath(), 1));
++
++        assertThat(sdkHome.list(), emptyArray());
++    }
++
++    @Test
++    public void untargzRejectsEntryThatIsAbsoluteOnceTrimmed() throws IOException {
++        final File sdkHome = newFolder(tempDir, "sdk-home-absolute");
++        final File targz = createTarGz("absolute.tar.gz", tarFile("sdk//etc/passwd"));
++
++        final IOException e =
++                assertThrows(IOException.class, () -> ZipUtils.untargz(targz, sdkHome.getAbsolutePath(), 1));
++
++        assertThat(e.getMessage(), containsString("absolute path"));
++        assertThat(sdkHome.list(), emptyArray());
++    }
++
++    @ParameterizedTest
++    @ValueSource(strings = {"link/marker", "link", "link/"})
++    public void untargzPreservesEarlierFilesWhenLaterTargetIsSymlinked(final String entryName) throws IOException {
++        final File sdkHome = newFolder(tempDir, "sdk-preflight");
++        final File original = new File(sdkHome, "first.txt");
++        Files.writeString(original.toPath(), "original");
++        final File outside = newFolder(tempDir, "outside-preflight");
++        createSymlinkOrSkip(new File(sdkHome, "link"), outside);
++        final TarArchiveEntry entry =
++                entryName.endsWith("/") ? new TarArchiveEntry("sdk/" + entryName) : tarFile("sdk/" + entryName);
++        final File archive = createTarGz("preflight.tar.gz", tarFile("sdk/first.txt"), entry);
++
++        final IOException e = assertThrows(IOException.class, () -> ZipUtils.untargz(archive, sdkHome.getPath(), 1));
++
++        assertThat(e.getMessage(), containsString(entryName));
++        assertEquals("original", Files.readString(original.toPath()));
++        assertThat(outside.list(), emptyArray());
++    }
++
++    @Test
++    public void untargzChecksAbsolutePathsAfterTrimming() throws IOException {
++        final File sdkHome = newFolder(tempDir, "sdk-home-absolute-trimmed");
++        final File targz = createTarGz("absolute-trimmed.tar.gz", tarFile("/sdk/bin/atlas-run"));
++
++        // Trimming the leading (empty) segment leaves "sdk/bin/atlas-run", which is within the destination
++        ZipUtils.untargz(targz, sdkHome.getAbsolutePath(), 1);
++
++        assertTrue(new File(sdkHome, "sdk/bin/atlas-run").isFile());
++    }
++
++    @Test
++    public void untargzRejectsEntryEscapingDestinationAfterTrimming() throws IOException {
++        // Reproduces the atlas-update SDK archive finding: "sdk/../marker" becomes "../marker" once trimmed
++        final File sdkHome = newFolder(tempDir, "sdk-home");
++        final File targz = createTarGz("traversal.tar.gz", "sdk/../tar-escape-marker");
++
++        final IOException e =
++                assertThrows(IOException.class, () -> ZipUtils.untargz(targz, sdkHome.getAbsolutePath(), 1));
++
++        assertThat(e.getMessage(), containsString("sdk/../tar-escape-marker"));
++        assertFalse(new File(tempDir, "tar-escape-marker").exists());
++    }
++
++    @Test
++    public void untargzExtractsEntriesWithinDestination() throws IOException {
++        final File sdkHome = newFolder(tempDir, "sdk-home-valid");
++        final File targz = createTarGz("valid.tar.gz", "sdk/bin/atlas-run");
++
++        ZipUtils.untargz(targz, sdkHome.getAbsolutePath(), 1);
++
++        assertTrue(new File(sdkHome, "bin/atlas-run").isFile());
++    }
++
++    private File createZip(final String name, final String entryName) throws IOException {
++        return createZip(name, zipEntry(entryName, 0, entryName));
++    }
++
++    private File createZip(final String name, final ZipArchiveEntryWithContent... entries) throws IOException {
++        final File zipFile = new File(tempDir, name);
++        try (ZipArchiveOutputStream out = new ZipArchiveOutputStream(zipFile)) {
++            for (final ZipArchiveEntryWithContent entry : entries) {
++                out.putArchiveEntry(entry.entry);
++                out.write(entry.content);
++                out.closeArchiveEntry();
++            }
++        }
++        return zipFile;
++    }
++
++    private static ZipArchiveEntryWithContent zipEntry(final String name, final int unixMode, final String content) {
++        final ZipArchiveEntry entry = new ZipArchiveEntry(name);
++        if (unixMode != 0) {
++            entry.setUnixMode(unixMode);
++        }
++        return new ZipArchiveEntryWithContent(entry, content.getBytes(StandardCharsets.UTF_8));
++    }
++
++    private static final class ZipArchiveEntryWithContent {
++        final ZipArchiveEntry entry;
++        final byte[] content;
++
++        ZipArchiveEntryWithContent(final ZipArchiveEntry entry, final byte[] content) {
++            this.entry = entry;
++            this.content = content;
++        }
++    }
++
++    private File createTarGz(final String name, final String entryName) throws IOException {
++        return createTarGz(name, tarFile(entryName));
++    }
++
++    private File createTarGz(final String name, final TarArchiveEntry... entries) throws IOException {
++        final File targz = new File(tempDir, name);
++        try (OutputStream fileOut = Files.newOutputStream(targz.toPath());
++                GzipCompressorOutputStream gzOut = new GzipCompressorOutputStream(fileOut);
++                TarArchiveOutputStream tarOut = new TarArchiveOutputStream(gzOut)) {
++            for (final TarArchiveEntry entry : entries) {
++                tarOut.putArchiveEntry(entry);
++                if (entry.getSize() > 0) {
++                    // Regular files contain their own name; links have no content
++                    tarOut.write(entry.getName().getBytes(StandardCharsets.UTF_8));
++                }
++                tarOut.closeArchiveEntry();
++            }
++        }
++        return targz;
++    }
++
++    private static TarArchiveEntry tarFile(final String entryName) {
++        // Preserve absolute paths and drive letters, so that malicious names reach ZipUtils as-is
++        final TarArchiveEntry entry = new TarArchiveEntry(entryName, true);
++        entry.setSize(entryName.getBytes(StandardCharsets.UTF_8).length);
++        return entry;
++    }
++
++    private static TarArchiveEntry tarLink(final String entryName, final byte linkFlag, final String linkName) {
++        final TarArchiveEntry entry = new TarArchiveEntry(entryName, linkFlag);
++        entry.setLinkName(linkName);
++        return entry;
++    }
++
++    private static void createSymlinkOrSkip(final File link, final File target) {
++        try {
++            Files.createSymbolicLink(link.toPath(), target.toPath());
++        } catch (IOException | UnsupportedOperationException e) {
++            assumeTrue(false, "Symbolic links are not supported on this platform");
++        }
++    }
++
+     private static File newFolder(File root, String... subDirs) throws IOException {
+         String subFolder = String.join("/", subDirs);
+         File result = new File(root, subFolder);
